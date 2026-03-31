@@ -55,12 +55,17 @@ pub struct S3Storage {
 
 #[cfg(feature = "s3")]
 impl S3Storage {
-    pub async fn new(bucket: &str, region: &str, url_prefix: &str) -> Self {
+    pub async fn new(bucket: &str, endpoint: &str, region: &str, url_prefix: &str) -> Self {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region.to_string()))
+            .endpoint_url(endpoint)
             .load()
             .await;
-        let client = aws_sdk_s3::Client::new(&config);
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::from(&config)
+                .force_path_style(true) // Required for MinIO
+                .build(),
+        );
         Self {
             client,
             bucket: bucket.to_string(),
@@ -81,7 +86,7 @@ impl Storage for S3Storage {
             .content_type(content_type)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("S3 upload error: {e:?}"))?;
         Ok(format!("{}/{}", self.url_prefix, filename))
     }
 

@@ -9,8 +9,6 @@ use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
-use storage::LocalStorage;
-
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -22,10 +20,27 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    // Storage: local by default, S3 via feature flag
+    // Storage: S3/MinIO if configured, otherwise local
+    let storage: Arc<dyn storage::Storage> = if let Ok(bucket) = std::env::var("S3_BUCKET") {
+        #[cfg(feature = "s3")]
+        {
+            let endpoint = std::env::var("S3_ENDPOINT").expect("S3_ENDPOINT must be set");
+            let region = std::env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+            let url_prefix = std::env::var("S3_URL_PREFIX").expect("S3_URL_PREFIX must be set");
+            Arc::new(storage::S3Storage::new(&bucket, &endpoint, &region, &url_prefix).await)
+        }
+        #[cfg(not(feature = "s3"))]
+        {
+            let _ = bucket;
+            panic!("S3_BUCKET is set but s3 feature is not enabled. Build with: cargo build --features s3");
+        }
+    } else {
+        let upload_dir = std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
+        let upload_url_prefix = std::env::var("UPLOAD_URL_PREFIX").unwrap_or_else(|_| "/uploads".to_string());
+        Arc::new(storage::LocalStorage::new(&upload_dir, &upload_url_prefix))
+    };
+
     let upload_dir = std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
-    let upload_url_prefix = std::env::var("UPLOAD_URL_PREFIX").unwrap_or_else(|_| "/uploads".to_string());
-    let storage: Arc<dyn storage::Storage> = Arc::new(LocalStorage::new(&upload_dir, &upload_url_prefix));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -36,7 +51,7 @@ async fn main() {
         .nest("/api", routes::api_router().with_state(pool.clone()))
         .nest("/api", routes::upload_router().with_state((pool.clone(), storage)))
         .nest("/ai", routes::ai_router().with_state(pool))
-        // Serve uploaded files
+        // Serve local uploads (still useful as fallback)
         .nest_service("/uploads", ServeDir::new(&upload_dir))
         .layer(cors);
 

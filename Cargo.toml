@@ -20,5 +20,6 @@ async-trait = "0.1"
 image = "0.25"
 
 [features]
-default = []
+default = ["s3"]
 s3 = ["aws-sdk-s3", "aws-config"]
+local-storage = []
