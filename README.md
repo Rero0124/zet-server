@@ -58,7 +58,8 @@ src/
     ├── search.rs        # 전문 검색 (tsvector)
     ├── trending.rs      # 트렌드 (실제 사용자 반응 기반 인구통계별 집계)
     ├── profile.rs       # 프로필 조회/수정
-    └── interactions.rs  # 인터랙션 기록 (impression/dwell/click)
+    ├── interactions.rs  # 인터랙션 기록 (impression/dwell/click)
+    └── ai.rs            # AI 전용 엔드포인트 (/ai/*, /api 밖 별도 마운트)
 ```
 
 ## API
@@ -101,6 +102,17 @@ src/
 | GET | `/api/search?q=&category=` | 전문 검색 |
 | GET | `/api/trending?period=&age_group=&gender=&region=` | 트렌드 게시글 |
 | GET | `/api/trending/keywords?...` | 인기 키워드 |
+
+### AI 전용 (`/ai/*` — `/api` 밖 별도 마운트, 인증 불필요)
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/ai/search?q=&limit=` | 게시글 검색 + 리뷰 요약 + 상위 리뷰 |
+| GET | `/ai/product/{id}` | 제품 상세 + 전체 리뷰 + 기업 정보 |
+| GET | `/ai/trending?period=&category=&limit=` | 인기 제품 + 트렌드 키워드 |
+| GET | `/ai/category/{name}` | 카테고리별 인기 제품 + 리뷰 요약 |
+
+AI 응답은 한 요청에 게시글 + 리뷰 + 통계를 풍부하게 담아 반환.
+`llms.txt` (웹 public/)에 AI용 API 문서 제공.
 
 ### 인터랙션
 | Method | Path | 설명 |

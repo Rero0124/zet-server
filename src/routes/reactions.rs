@@ -18,6 +18,7 @@ pub fn router() -> Router<Db> {
         .route("/posts/{post_id}/reactions/{reaction_id}", axum::routing::put(update_reaction).delete(delete_reaction))
         .route("/posts/{post_id}/like", post(toggle_like))
         .route("/posts/{post_id}/bookmark", post(toggle_bookmark))
+        .route("/posts/{post_id}/status", axum::routing::get(reaction_status))
 }
 
 async fn create_reaction(
@@ -26,10 +27,10 @@ async fn create_reaction(
     Json(body): Json<CreateReaction>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let reaction = sqlx::query_as::<_, Reaction>(
-        r#"INSERT INTO reactions (post_id, user_id, reaction_type, content, rating)
-           VALUES ($1, $2, $3, $4, $5)
+        r#"INSERT INTO reactions (post_id, user_id, reaction_type, content, rating, media_urls)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (post_id, user_id, reaction_type) DO UPDATE
-           SET content = EXCLUDED.content, rating = EXCLUDED.rating
+           SET content = EXCLUDED.content, rating = EXCLUDED.rating, media_urls = EXCLUDED.media_urls
            RETURNING *"#,
     )
     .bind(post_id)
@@ -37,6 +38,7 @@ async fn create_reaction(
     .bind(&body.reaction_type)
     .bind(&body.content)
     .bind(body.rating)
+    .bind(&body.media_urls.unwrap_or_default())
     .fetch_one(&pool)
     .await
     .map_err(|e| {
@@ -225,3 +227,36 @@ async fn toggle_bookmark(
 
     Ok(Json(json!({"bookmarked": bookmarked})))
 }
+
+#[derive(Debug, Deserialize)]
+struct StatusQuery {
+    user_id: Uuid,
+}
+
+async fn reaction_status(
+    State(pool): State<Db>,
+    Path(post_id): Path<Uuid>,
+    Query(query): Query<StatusQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let liked = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM reactions WHERE post_id = $1 AND user_id = $2 AND reaction_type = 'like'",
+    )
+    .bind(post_id)
+    .bind(query.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    let bookmarked = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM reactions WHERE post_id = $1 AND user_id = $2 AND reaction_type = 'bookmark'",
+    )
+    .bind(post_id)
+    .bind(query.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    Ok(Json(json!({ "liked": liked, "bookmarked": bookmarked })))
+}
+
+use axum::extract::Query;

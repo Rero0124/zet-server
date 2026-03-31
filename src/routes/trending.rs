@@ -1,7 +1,7 @@
 use axum::{
     Router,
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
 };
@@ -9,12 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::db::Db;
-use crate::models::post::Post;
 
 pub fn router() -> Router<Db> {
     Router::new()
-        .route("/trending", get(trending))
         .route("/trending/keywords", get(trending_keywords))
+        .route("/trending/keywords/{keyword}", get(keyword_detail))
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,103 +26,25 @@ pub struct TrendingQuery {
     pub limit: Option<i64>,
 }
 
-/// Trending posts based on all user interactions (reactions + impressions/dwell/clicks).
-/// Weighted: like=3, review=4, bookmark=2, click=2, dwell=1 per second (capped at 5), impression=0.1
-async fn trending(
-    State(pool): State<Db>,
-    Query(query): Query<TrendingQuery>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let limit = query.limit.unwrap_or(20).min(50);
-    let period_interval = match query.period.as_deref() {
-        Some("day") => "1 day",
-        Some("month") => "30 days",
-        _ => "7 days",
-    };
-
-    let has_demo_filter = query.age_group.is_some() || query.gender.is_some() || query.region.is_some();
-
-    let posts = if has_demo_filter {
-        sqlx::query_as::<_, Post>(
-            r#"SELECT p.*, COALESCE(eng.engagement, 0) AS _eng
-               FROM posts p
-               LEFT JOIN (
-                 -- Weighted engagement from reactions
-                 SELECT post_id, SUM(
-                   CASE reaction_type
-                     WHEN 'like' THEN 3
-                     WHEN 'review' THEN 4
-                     WHEN 'bookmark' THEN 2
-                     ELSE 1
-                   END
-                 ) AS engagement
-                 FROM reactions r
-                 JOIN users u ON u.id = r.user_id
-                 WHERE r.created_at > now() - $1::interval
-                   AND ($2::text IS NULL OR age_group_from_birth(u.birth_date) = $2)
-                   AND ($3::text IS NULL OR u.gender = $3)
-                   AND ($4::text IS NULL OR u.region = $4)
-                 GROUP BY post_id
-               ) eng ON eng.post_id = p.id
-               LEFT JOIN (
-                 -- Weighted engagement from interactions (click/dwell/impression)
-                 SELECT post_id, SUM(
-                   CASE interaction_type
-                     WHEN 'click' THEN 2
-                     WHEN 'dwell' THEN LEAST(COALESCE(duration_ms, 0) / 1000.0, 5)
-                     WHEN 'impression' THEN 0.1
-                     ELSE 0
-                   END
-                 ) AS engagement
-                 FROM interactions i
-                 JOIN users u ON u.id = i.user_id
-                 WHERE i.created_at > now() - $1::interval
-                   AND ($2::text IS NULL OR age_group_from_birth(u.birth_date) = $2)
-                   AND ($3::text IS NULL OR u.gender = $3)
-                   AND ($4::text IS NULL OR u.region = $4)
-                 GROUP BY post_id
-               ) ieng ON ieng.post_id = p.id
-               WHERE p.active = true
-                 AND ($5::text IS NULL OR p.category = $5)
-                 AND (COALESCE(eng.engagement, 0) + COALESCE(ieng.engagement, 0)) > 0
-               ORDER BY (COALESCE(eng.engagement, 0) + COALESCE(ieng.engagement, 0)) DESC, p.score DESC
-               LIMIT $6"#,
-        )
-        .bind(period_interval)
-        .bind(&query.age_group)
-        .bind(&query.gender)
-        .bind(&query.region)
-        .bind(&query.category)
-        .bind(limit)
-        .fetch_all(&pool)
-        .await
-    } else {
-        sqlx::query_as::<_, Post>(
-            r#"SELECT * FROM posts
-               WHERE active = true
-                 AND created_at > now() - $1::interval
-                 AND ($2::text IS NULL OR category = $2)
-               ORDER BY score DESC, like_count DESC, review_count DESC
-               LIMIT $3"#,
-        )
-        .bind(period_interval)
-        .bind(&query.category)
-        .bind(limit)
-        .fetch_all(&pool)
-        .await
-    }
-    .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
-    })?;
-
-    Ok(Json(json!({ "posts": posts })))
-}
-
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct KeywordTrend {
     keyword: String,
     count: i64,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct TimePoint {
+    date: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct RegionInterest {
+    region: String,
+    count: i64,
+}
+
+/// Trending keywords with sparkline data (count per day over period)
 async fn trending_keywords(
     State(pool): State<Db>,
     Query(query): Query<TrendingQuery>,
@@ -135,26 +56,20 @@ async fn trending_keywords(
         _ => "7 days",
     };
 
-    let has_demo_filter = query.age_group.is_some() || query.gender.is_some() || query.region.is_some();
+    let has_demo = query.age_group.is_some() || query.gender.is_some() || query.region.is_some();
 
-    let keywords = if has_demo_filter {
+    // Get top keywords by interaction count
+    let keywords = if has_demo {
         sqlx::query_as::<_, KeywordTrend>(
-            r#"SELECT unnest(p.tags) AS keyword, COUNT(DISTINCT r.id) + COUNT(DISTINCT i.id) AS count
+            r#"SELECT unnest(p.tags) AS keyword, COUNT(DISTINCT r.id) AS count
                FROM posts p
-               LEFT JOIN reactions r ON r.post_id = p.id
-                 AND r.created_at > now() - $1::interval
-               LEFT JOIN users ru ON ru.id = r.user_id
-                 AND ($2::text IS NULL OR age_group_from_birth(ru.birth_date) = $2)
-                 AND ($3::text IS NULL OR ru.gender = $3)
-                 AND ($4::text IS NULL OR ru.region = $4)
-               LEFT JOIN interactions i ON i.post_id = p.id
-                 AND i.created_at > now() - $1::interval
-               LEFT JOIN users iu ON iu.id = i.user_id
-                 AND ($2::text IS NULL OR age_group_from_birth(iu.birth_date) = $2)
-                 AND ($3::text IS NULL OR iu.gender = $3)
-                 AND ($4::text IS NULL OR iu.region = $4)
+               JOIN reactions r ON r.post_id = p.id
+               JOIN users u ON u.id = r.user_id
                WHERE p.active = true
-                 AND (r.id IS NOT NULL OR i.id IS NOT NULL)
+                 AND r.created_at > now() - $1::interval
+                 AND ($2::text IS NULL OR age_group_from_birth(u.birth_date) = $2)
+                 AND ($3::text IS NULL OR u.gender = $3)
+                 AND ($4::text IS NULL OR u.region = $4)
                GROUP BY keyword
                ORDER BY count DESC
                LIMIT $5"#,
@@ -182,9 +97,135 @@ async fn trending_keywords(
         .fetch_all(&pool)
         .await
     }
-    .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
-    })?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
-    Ok(Json(json!({ "keywords": keywords })))
+    // For each keyword, get daily time series for sparkline
+    let mut results = Vec::new();
+    for kw in &keywords {
+        let series = get_keyword_series(&pool, &kw.keyword, period_interval).await;
+        results.push(json!({
+            "keyword": kw.keyword,
+            "count": kw.count,
+            "series": series,
+        }));
+    }
+
+    Ok(Json(json!({ "keywords": results })))
+}
+
+/// Keyword detail: time series, regional interest, related topics, related searches
+async fn keyword_detail(
+    State(pool): State<Db>,
+    Path(keyword): Path<String>,
+    Query(query): Query<TrendingQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let period_interval = match query.period.as_deref() {
+        Some("day") => "1 day",
+        Some("week") => "7 days",
+        _ => "30 days", // default to month for detail view
+    };
+
+    // Time series
+    let series = get_keyword_series(&pool, &keyword, period_interval).await;
+
+    // Regional interest
+    let regions = sqlx::query_as::<_, RegionInterest>(
+        r#"SELECT u.region AS region, COUNT(DISTINCT r.id) AS count
+           FROM reactions r
+           JOIN users u ON u.id = r.user_id
+           JOIN posts p ON p.id = r.post_id
+           WHERE p.active = true
+             AND $1 = ANY(p.tags)
+             AND r.created_at > now() - $2::interval
+             AND u.region IS NOT NULL AND u.region != ''
+           GROUP BY u.region
+           ORDER BY count DESC
+           LIMIT 10"#,
+    )
+    .bind(&keyword)
+    .bind(period_interval)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    // Related topics: other tags that appear with this keyword
+    let related_topics = sqlx::query_as::<_, KeywordTrend>(
+        r#"SELECT tag AS keyword, COUNT(DISTINCT p.id) AS count
+           FROM posts p, unnest(p.tags) AS tag
+           WHERE p.active = true
+             AND $1 = ANY(p.tags)
+             AND p.created_at > now() - $2::interval
+             AND tag != $1
+           GROUP BY tag
+           ORDER BY count DESC
+           LIMIT 10"#,
+    )
+    .bind(&keyword)
+    .bind(period_interval)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    // Related searches: keywords from posts that users who interacted with this keyword also interacted with
+    let related_searches = sqlx::query_as::<_, KeywordTrend>(
+        r#"SELECT unnest(p2.tags) AS keyword, COUNT(DISTINCT r2.user_id) AS count
+           FROM reactions r1
+           JOIN posts p1 ON p1.id = r1.post_id
+           JOIN reactions r2 ON r2.user_id = r1.user_id AND r2.post_id != r1.post_id
+           JOIN posts p2 ON p2.id = r2.post_id
+           WHERE p1.active = true AND p2.active = true
+             AND $1 = ANY(p1.tags)
+             AND r1.created_at > now() - $2::interval
+             AND NOT ($1 = ANY(p2.tags))
+           GROUP BY keyword
+           ORDER BY count DESC
+           LIMIT 10"#,
+    )
+    .bind(&keyword)
+    .bind(period_interval)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    // Total count
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(DISTINCT r.id)
+           FROM reactions r
+           JOIN posts p ON p.id = r.post_id
+           WHERE p.active = true AND $1 = ANY(p.tags)
+             AND r.created_at > now() - $2::interval"#,
+    )
+    .bind(&keyword)
+    .bind(period_interval)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    Ok(Json(json!({
+        "keyword": keyword,
+        "total_interactions": total,
+        "period": query.period.as_deref().unwrap_or("month"),
+        "series": series,
+        "regions": regions,
+        "related_topics": related_topics,
+        "related_searches": related_searches,
+    })))
+}
+
+async fn get_keyword_series(pool: &crate::db::Db, keyword: &str, period_interval: &str) -> Vec<TimePoint> {
+    sqlx::query_as::<_, TimePoint>(
+        r#"SELECT to_char(r.created_at::date, 'YYYY-MM-DD') AS date, COUNT(DISTINCT r.id) AS count
+           FROM reactions r
+           JOIN posts p ON p.id = r.post_id
+           WHERE p.active = true
+             AND $1 = ANY(p.tags)
+             AND r.created_at > now() - $2::interval
+           GROUP BY r.created_at::date
+           ORDER BY r.created_at::date"#,
+    )
+    .bind(keyword)
+    .bind(period_interval)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
 }

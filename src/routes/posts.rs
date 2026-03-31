@@ -41,14 +41,27 @@ async fn create_post(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
+    // Build content from blocks (extract text for plain content field)
+    let blocks_json = body.blocks.as_ref().map(|b| serde_json::to_value(b).unwrap_or_default());
+    let content = if let Some(blocks) = &body.blocks {
+        blocks.iter()
+            .filter(|b| b.block_type == "text")
+            .map(|b| b.value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        body.content.clone().unwrap_or_default()
+    };
+
     let post = sqlx::query_as::<_, Post>(
-        r#"INSERT INTO posts (author_id, company_id, content, media_urls, category, tags, target_age, target_gender, target_region, pricing_model, budget)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        r#"INSERT INTO posts (author_id, company_id, content, blocks, media_urls, category, tags, target_age, target_gender, target_region, pricing_model, budget)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            RETURNING *"#,
     )
     .bind(body.author_id)
     .bind(company_id)
-    .bind(&body.content)
+    .bind(&content)
+    .bind(&blocks_json)
     .bind(&body.media_urls.unwrap_or_default())
     .bind(&body.category)
     .bind(&body.tags.unwrap_or_default())
@@ -85,9 +98,11 @@ async fn get_post(
 #[derive(Debug, Deserialize)]
 struct UpdatePost {
     author_id: Uuid,
+    blocks: Option<Vec<crate::models::post::ContentBlock>>,
     content: Option<String>,
     category: Option<String>,
     tags: Option<Vec<String>>,
+    media_urls: Option<Vec<String>>,
     target_age: Option<String>,
     target_gender: Option<String>,
     target_region: Option<String>,
@@ -110,22 +125,38 @@ async fn update_post(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "본인의 게시글만 수정할 수 있습니다"}))));
     }
 
+    // Build content from blocks if provided
+    let blocks_json = body.blocks.as_ref().map(|b| serde_json::to_value(b).unwrap_or_default());
+    let content = if let Some(blocks) = &body.blocks {
+        Some(blocks.iter()
+            .filter(|b| b.block_type == "text")
+            .map(|b| b.value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    } else {
+        body.content.clone()
+    };
+
     let post = sqlx::query_as::<_, Post>(
         r#"UPDATE posts SET
             content = COALESCE($2, content),
-            category = COALESCE($3, category),
-            tags = COALESCE($4, tags),
-            target_age = COALESCE($5, target_age),
-            target_gender = COALESCE($6, target_gender),
-            target_region = COALESCE($7, target_region),
+            blocks = COALESCE($3, blocks),
+            category = COALESCE($4, category),
+            tags = COALESCE($5, tags),
+            media_urls = COALESCE($6, media_urls),
+            target_age = COALESCE($7, target_age),
+            target_gender = COALESCE($8, target_gender),
+            target_region = COALESCE($9, target_region),
             updated_at = now()
            WHERE id = $1
            RETURNING *"#,
     )
     .bind(id)
-    .bind(&body.content)
+    .bind(&content)
+    .bind(&blocks_json)
     .bind(&body.category)
     .bind(&body.tags)
+    .bind(&body.media_urls)
     .bind(&body.target_age)
     .bind(&body.target_gender)
     .bind(&body.target_region)

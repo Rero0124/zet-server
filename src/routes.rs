@@ -6,11 +6,15 @@ mod search;
 mod trending;
 mod profile;
 mod interactions;
+pub mod ai;
+mod upload;
 
+use std::sync::Arc;
 use axum::Router;
 use crate::db::Db;
+use crate::storage::Storage;
 
-pub fn router() -> Router<Db> {
+pub fn api_router() -> Router<Db> {
     Router::new()
         .merge(auth::router())
         .merge(posts::router())
@@ -20,4 +24,12 @@ pub fn router() -> Router<Db> {
         .merge(trending::router())
         .merge(profile::router())
         .merge(interactions::router())
+}
+
+pub fn upload_router() -> Router<(Db, Arc<dyn Storage>)> {
+    upload::router()
+}
+
+pub fn ai_router() -> Router<Db> {
+    ai::router()
 }

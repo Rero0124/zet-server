@@ -1,0 +1,1 @@
+ALTER TABLE reactions ADD COLUMN IF NOT EXISTS media_urls TEXT[] DEFAULT '{}';

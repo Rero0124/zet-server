@@ -10,6 +10,7 @@ pub struct Reaction {
     pub reaction_type: String,
     pub content: Option<String>,
     pub rating: Option<i16>,
+    pub media_urls: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -19,4 +20,5 @@ pub struct CreateReaction {
     pub reaction_type: String,
     pub content: Option<String>,
     pub rating: Option<i16>,
+    pub media_urls: Option<Vec<String>>,
 }
