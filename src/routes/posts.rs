@@ -35,12 +35,6 @@ async fn create_post(
         None => return Err((StatusCode::NOT_FOUND, Json(json!({"error": "사용자를 찾을 수 없습니다"})))),
     }
 
-    let company_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM companies WHERE user_id = $1 LIMIT 1")
-        .bind(body.author_id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
-
     // Build content from blocks (extract text for plain content field)
     let blocks_json = body.blocks.as_ref().map(|b| serde_json::to_value(b).unwrap_or_default());
     let content = if let Some(blocks) = &body.blocks {
@@ -54,12 +48,11 @@ async fn create_post(
     };
 
     let post = sqlx::query_as::<_, Post>(
-        r#"INSERT INTO posts (author_id, company_id, content, blocks, media_urls, category, tags, target_age, target_gender, target_region, pricing_model, budget)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        r#"INSERT INTO posts (author_id, content, blocks, media_urls, category, tags, target_age, target_gender, target_region, pricing_model, budget)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            RETURNING *"#,
     )
     .bind(body.author_id)
-    .bind(company_id)
     .bind(&content)
     .bind(&blocks_json)
     .bind(&body.media_urls.unwrap_or_default())

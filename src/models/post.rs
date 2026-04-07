@@ -5,7 +5,6 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Post {
     pub id: Uuid,
-    pub company_id: Option<Uuid>,
     pub author_id: Option<Uuid>,
     pub content: String,
     pub blocks: Option<serde_json::Value>,

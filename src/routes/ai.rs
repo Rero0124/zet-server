@@ -135,10 +135,10 @@ async fn ai_product(
     let reviews = get_all_reviews(&pool, id).await;
     let summary = get_review_summary(&pool, id).await;
 
-    // Get company name if available
-    let company_name: Option<String> = if let Some(cid) = post.company_id {
-        sqlx::query_scalar("SELECT business_name FROM companies WHERE id = $1")
-            .bind(cid)
+    // Get author name as company name
+    let company_name: Option<String> = if let Some(aid) = post.author_id {
+        sqlx::query_scalar("SELECT name FROM users WHERE id = $1")
+            .bind(aid)
             .fetch_optional(&pool)
             .await
             .ok()

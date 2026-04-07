@@ -38,6 +38,7 @@ async fn get_user(
 
 #[derive(Debug, Deserialize)]
 struct UpdateUser {
+    username: Option<String>,
     name: Option<String>,
     birth_date: Option<NaiveDate>,
     gender: Option<String>,
@@ -51,15 +52,17 @@ async fn update_user(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = sqlx::query_as::<_, User>(
         r#"UPDATE users SET
-            name = COALESCE($2, name),
-            birth_date = COALESCE($3, birth_date),
-            gender = COALESCE($4, gender),
-            region = COALESCE($5, region),
+            username = COALESCE($2, username),
+            name = COALESCE($3, name),
+            birth_date = COALESCE($4, birth_date),
+            gender = COALESCE($5, gender),
+            region = COALESCE($6, region),
             updated_at = now()
            WHERE id = $1
            RETURNING *"#,
     )
     .bind(id)
+    .bind(&body.username)
     .bind(&body.name)
     .bind(&body.birth_date)
     .bind(&body.gender)

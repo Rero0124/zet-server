@@ -8,6 +8,7 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
+    pub username: String,
     pub name: String,
     pub birth_date: Option<NaiveDate>,
     pub gender: Option<String>,
@@ -22,13 +23,12 @@ pub struct User {
 pub struct CreateUser {
     pub email: String,
     pub password: String,
+    pub username: String,
     pub name: String,
     pub birth_date: Option<NaiveDate>,
     pub gender: Option<String>,
     pub region: Option<String>,
     pub is_business: Option<bool>,
-    pub business_name: Option<String>,
-    pub registration_no: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
