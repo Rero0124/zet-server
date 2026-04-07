@@ -23,6 +23,7 @@ pub fn router() -> Router<Db> {
 #[derive(Debug, Deserialize)]
 struct ListQuestionsQuery {
     post_id: Option<Uuid>,
+    user_id: Option<Uuid>,
     tag: Option<String>,
     q: Option<String>,
     cursor: Option<i64>,
@@ -44,6 +45,12 @@ async fn list_questions(
     if query.post_id.is_some() {
         idx += 1;
         conditions.push(format!("q.post_id = ${idx}"));
+    }
+
+    // user_id 필터
+    if query.user_id.is_some() {
+        idx += 1;
+        conditions.push(format!("q.user_id = ${idx}"));
     }
 
     // 태그 필터
@@ -87,6 +94,9 @@ async fn list_questions(
     let mut qb = sqlx::query_as::<_, QuestionWithUser>(&sql);
     if let Some(post_id) = &query.post_id {
         qb = qb.bind(post_id);
+    }
+    if let Some(user_id) = &query.user_id {
+        qb = qb.bind(user_id);
     }
     if let Some(tag) = &query.tag {
         qb = qb.bind(tag);
