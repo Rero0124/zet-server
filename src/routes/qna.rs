@@ -23,6 +23,7 @@ pub fn router() -> Router<Db> {
 #[derive(Debug, Deserialize)]
 struct ListQuestionsQuery {
     post_id: Option<Uuid>,
+    tag: Option<String>,
     q: Option<String>,
     cursor: Option<i64>,
     limit: Option<i64>,
@@ -35,71 +36,68 @@ async fn list_questions(
     let limit = query.limit.unwrap_or(20).min(50);
     let offset = query.cursor.unwrap_or(0);
 
-    let questions = match (&query.q, &query.post_id) {
-        // 검색 + 게시글 필터
-        (Some(q), Some(post_id)) => {
-            let pattern = format!("%{}%", q.trim());
-            sqlx::query_as::<_, QuestionWithUser>(
-                r#"SELECT DISTINCT q.*, u.name as user_name, u.username as user_username
-                   FROM questions q
-                   JOIN users u ON q.user_id = u.id
-                   LEFT JOIN answers a ON a.question_id = q.id
-                   WHERE q.post_id = $1
-                     AND (q.content ILIKE $2 OR a.content ILIKE $2)
-                   ORDER BY q.created_at DESC LIMIT $3 OFFSET $4"#,
-            )
-            .bind(post_id)
-            .bind(&pattern)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await
-        }
-        // 검색만
-        (Some(q), None) => {
-            let pattern = format!("%{}%", q.trim());
-            sqlx::query_as::<_, QuestionWithUser>(
-                r#"SELECT DISTINCT q.*, u.name as user_name, u.username as user_username
-                   FROM questions q
-                   JOIN users u ON q.user_id = u.id
-                   LEFT JOIN answers a ON a.question_id = q.id
-                   WHERE q.content ILIKE $1 OR a.content ILIKE $1
-                   ORDER BY q.created_at DESC LIMIT $2 OFFSET $3"#,
-            )
-            .bind(&pattern)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await
-        }
-        // 게시글 필터만
-        (None, Some(post_id)) => {
-            sqlx::query_as::<_, QuestionWithUser>(
-                r#"SELECT q.*, u.name as user_name, u.username as user_username
-                   FROM questions q JOIN users u ON q.user_id = u.id
-                   WHERE q.post_id = $1
-                   ORDER BY q.created_at DESC LIMIT $2 OFFSET $3"#,
-            )
-            .bind(post_id)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await
-        }
-        // 전체
-        (None, None) => {
-            sqlx::query_as::<_, QuestionWithUser>(
-                r#"SELECT q.*, u.name as user_name, u.username as user_username
-                   FROM questions q JOIN users u ON q.user_id = u.id
-                   ORDER BY q.created_at DESC LIMIT $1 OFFSET $2"#,
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await
-        }
+    // 동적 쿼리 빌드
+    let mut conditions: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+
+    // post_id 필터
+    if query.post_id.is_some() {
+        idx += 1;
+        conditions.push(format!("q.post_id = ${idx}"));
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    // 태그 필터
+    if query.tag.is_some() {
+        idx += 1;
+        conditions.push(format!("${idx} = ANY(q.tags)"));
+    }
+
+    // 검색어 (제목 + 태그)
+    let has_search = query.q.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let search_pattern = query.q.as_ref().map(|s| format!("%{}%", s.trim()));
+    if has_search {
+        idx += 1;
+        // 제목 ILIKE 또는 태그 배열에 포함
+        conditions.push(format!("(q.title ILIKE ${idx} OR EXISTS (SELECT 1 FROM unnest(q.tags) t WHERE t ILIKE ${idx}))"));
+    }
+
+    let distinct = "";
+    let answer_join = "";
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    idx += 1;
+    let limit_idx = idx;
+    idx += 1;
+    let offset_idx = idx;
+
+    let sql = format!(
+        r#"SELECT {distinct}q.*, u.name as user_name, u.username as user_username
+           FROM questions q
+           JOIN users u ON q.user_id = u.id
+           {answer_join}
+           {where_clause}
+           ORDER BY q.created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"#,
+    );
+
+    // sqlx는 동적 바인드가 까다로우니 query_as + manual bind
+    let mut qb = sqlx::query_as::<_, QuestionWithUser>(&sql);
+    if let Some(post_id) = &query.post_id {
+        qb = qb.bind(post_id);
+    }
+    if let Some(tag) = &query.tag {
+        qb = qb.bind(tag);
+    }
+    if let Some(pattern) = &search_pattern {
+        qb = qb.bind(pattern);
+    }
+    qb = qb.bind(limit).bind(offset);
+
+    let questions = qb.fetch_all(&pool).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
     Ok(Json(json!({ "questions": questions, "next_cursor": offset + limit })))
 }
@@ -108,7 +106,6 @@ async fn create_question(
     State(pool): State<Db>,
     Json(body): Json<CreateQuestion>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    // 게시글 존재 확인
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
         .bind(body.post_id)
         .fetch_one(&pool)
@@ -120,11 +117,13 @@ async fn create_question(
     }
 
     let question = sqlx::query_as::<_, Question>(
-        "INSERT INTO questions (post_id, user_id, content) VALUES ($1, $2, $3) RETURNING *",
+        "INSERT INTO questions (post_id, user_id, title, content, tags) VALUES ($1, $2, $3, $4, $5) RETURNING *",
     )
     .bind(body.post_id)
     .bind(body.user_id)
+    .bind(&body.title)
     .bind(&body.content)
+    .bind(&body.tags.unwrap_or_default())
     .fetch_one(&pool)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
@@ -270,7 +269,9 @@ struct QuestionWithUser {
     id: Uuid,
     post_id: Uuid,
     user_id: Uuid,
+    title: String,
     content: String,
+    tags: Vec<String>,
     answer_count: i32,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,

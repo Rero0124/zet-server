@@ -7,7 +7,9 @@ pub struct Question {
     pub id: Uuid,
     pub post_id: Uuid,
     pub user_id: Uuid,
+    pub title: String,
     pub content: String,
+    pub tags: Vec<String>,
     pub answer_count: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -17,7 +19,9 @@ pub struct Question {
 pub struct CreateQuestion {
     pub post_id: Uuid,
     pub user_id: Uuid,
+    pub title: String,
     pub content: String,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
