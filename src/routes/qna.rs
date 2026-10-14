@@ -20,6 +20,30 @@ pub fn router() -> Router<Db> {
         .route("/questions/{question_id}/answers/{id}", delete(delete_answer))
 }
 
+/// 질문 + 작성자 + 대상 게시글 요약 select 목록.
+/// `FROM questions q JOIN users u ON q.user_id = u.id
+///  LEFT JOIN posts p ON p.id = q.post_id LEFT JOIN users pa ON pa.id = p.author_id`
+const QUESTION_SELECT: &str = r#"q.*, u.name AS user_name, u.username AS user_username,
+    LEFT(p.content, 120) AS post_content,
+    p.category AS post_category,
+    p.author_id AS post_author_id,
+    pa.name AS post_author_name,
+    pa.username AS post_author_username"#;
+
+const QUESTION_FROM: &str = r#"FROM questions q
+    JOIN users u ON q.user_id = u.id
+    LEFT JOIN posts p ON p.id = q.post_id
+    LEFT JOIN users pa ON pa.id = p.author_id"#;
+
+/// 답변 + 작성자 + 브랜드(게시글 작성자) 여부
+const ANSWER_SELECT: &str = r#"a.*, u.name AS user_name, u.username AS user_username,
+    COALESCE(a.user_id = p.author_id, false) AS is_brand"#;
+
+const ANSWER_FROM: &str = r#"FROM answers a
+    JOIN users u ON a.user_id = u.id
+    JOIN questions q ON q.id = a.question_id
+    LEFT JOIN posts p ON p.id = q.post_id"#;
+
 #[derive(Debug, Deserialize)]
 struct ListQuestionsQuery {
     post_id: Option<Uuid>,
@@ -68,8 +92,6 @@ async fn list_questions(
         conditions.push(format!("(q.title ILIKE ${idx} OR EXISTS (SELECT 1 FROM unnest(q.tags) t WHERE t ILIKE ${idx}))"));
     }
 
-    let distinct = "";
-    let answer_join = "";
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -82,10 +104,8 @@ async fn list_questions(
     let offset_idx = idx;
 
     let sql = format!(
-        r#"SELECT {distinct}q.*, u.name as user_name, u.username as user_username
-           FROM questions q
-           JOIN users u ON q.user_id = u.id
-           {answer_join}
+        r#"SELECT {QUESTION_SELECT}
+           {QUESTION_FROM}
            {where_clause}
            ORDER BY q.created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"#,
     );
@@ -101,8 +121,10 @@ async fn list_questions(
     if let Some(tag) = &query.tag {
         qb = qb.bind(tag);
     }
-    if let Some(pattern) = &search_pattern {
-        qb = qb.bind(pattern);
+    if has_search {
+        if let Some(pattern) = &search_pattern {
+            qb = qb.bind(pattern);
+        }
     }
     qb = qb.bind(limit).bind(offset);
 
@@ -145,29 +167,16 @@ async fn get_question(
     State(pool): State<Db>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let question = sqlx::query_as::<_, QuestionWithUser>(
-        r#"SELECT q.*, u.name as user_name, u.username as user_username
-           FROM questions q JOIN users u ON q.user_id = u.id
-           WHERE q.id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let sql = format!("SELECT {QUESTION_SELECT} {QUESTION_FROM} WHERE q.id = $1");
+    let question = sqlx::query_as::<_, QuestionWithUser>(&sql)
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
     match question {
         Some(q) => {
-            let answers = sqlx::query_as::<_, AnswerWithUser>(
-                r#"SELECT a.*, u.name as user_name, u.username as user_username
-                   FROM answers a JOIN users u ON a.user_id = u.id
-                   WHERE a.question_id = $1
-                   ORDER BY a.created_at ASC"#,
-            )
-            .bind(id)
-            .fetch_all(&pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
-
+            let answers = fetch_answers(&pool, id).await?;
             Ok(Json(json!({"question": q, "answers": answers})))
         }
         None => Err((StatusCode::NOT_FOUND, Json(json!({"error": "질문을 찾을 수 없습니다"})))),
@@ -203,21 +212,22 @@ async fn delete_question(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn fetch_answers(pool: &Db, question_id: Uuid) -> Result<Vec<AnswerWithUser>, (StatusCode, Json<Value>)> {
+    let sql = format!(
+        "SELECT {ANSWER_SELECT} {ANSWER_FROM} WHERE a.question_id = $1 ORDER BY a.created_at ASC"
+    );
+    sqlx::query_as::<_, AnswerWithUser>(&sql)
+        .bind(question_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
+}
+
 async fn list_answers(
     State(pool): State<Db>,
     Path(question_id): Path<Uuid>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let answers = sqlx::query_as::<_, AnswerWithUser>(
-        r#"SELECT a.*, u.name as user_name, u.username as user_username
-           FROM answers a JOIN users u ON a.user_id = u.id
-           WHERE a.question_id = $1
-           ORDER BY a.created_at ASC"#,
-    )
-    .bind(question_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
-
+    let answers = fetch_answers(&pool, question_id).await?;
     Ok(Json(json!({ "answers": answers })))
 }
 
@@ -287,6 +297,11 @@ struct QuestionWithUser {
     updated_at: chrono::DateTime<chrono::Utc>,
     user_name: String,
     user_username: String,
+    post_content: Option<String>,
+    post_category: Option<String>,
+    post_author_id: Option<Uuid>,
+    post_author_name: Option<String>,
+    post_author_username: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
@@ -299,4 +314,6 @@ struct AnswerWithUser {
     updated_at: chrono::DateTime<chrono::Utc>,
     user_name: String,
     user_username: String,
+    /// 답변자가 질문 대상 게시글의 작성자(브랜드)인지
+    is_brand: bool,
 }

@@ -7,6 +7,8 @@ mod trending;
 mod profile;
 mod interactions;
 mod qna;
+mod brands;
+mod insights;
 pub mod ai;
 mod upload;
 
@@ -26,6 +28,8 @@ pub fn api_router() -> Router<Db> {
         .merge(profile::router())
         .merge(interactions::router())
         .merge(qna::router())
+        .merge(brands::router())
+        .merge(insights::router())
 }
 
 pub fn upload_router() -> Router<(Db, Arc<dyn Storage>)> {

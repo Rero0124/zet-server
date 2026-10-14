@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::models::post::Post;
+use crate::util::build_tsquery;
 
 pub fn router() -> Router<Db> {
     Router::new()
@@ -82,7 +83,8 @@ async fn ai_search(
     Query(query): Query<AiSearchQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let limit = query.limit.unwrap_or(10).min(20);
-    let tsquery = query.q.split_whitespace().collect::<Vec<_>>().join(" | ");
+    // 특수문자가 섞인 입력에서도 to_tsquery 가 실패하지 않도록 정제
+    let tsquery = build_tsquery(&query.q);
 
     let posts = sqlx::query_as::<_, Post>(
         r#"SELECT * FROM posts

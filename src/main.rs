@@ -2,6 +2,7 @@ mod db;
 mod models;
 mod routes;
 mod storage;
+mod util;
 
 use std::sync::Arc;
 use axum::Router;

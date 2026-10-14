@@ -6,7 +6,7 @@ use axum::{
     routing::post,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Db;
@@ -16,6 +16,9 @@ pub fn router() -> Router<Db> {
         .route("/interactions", post(track))
         .route("/interactions/batch", post(track_batch))
 }
+
+/// 허용되는 인터랙션 종류. 'cta' 는 광고 링크(외부) 클릭.
+const ALLOWED_TYPES: [&str; 4] = ["impression", "dwell", "click", "cta"];
 
 #[derive(Debug, Deserialize)]
 struct Interaction {
@@ -27,7 +30,12 @@ struct Interaction {
 
 /// Insert interaction only if the same user+post+type hasn't been recorded today.
 /// For dwell, always insert (multiple dwell events per day are meaningful).
+/// Unknown interaction types are silently ignored.
 async fn insert_interaction(pool: &crate::db::Db, item: &Interaction) {
+    if !ALLOWED_TYPES.contains(&item.interaction_type.as_str()) {
+        return;
+    }
+
     if item.interaction_type == "dwell" {
         // Dwell: always record, but cap at reasonable frequency
         let _ = sqlx::query(
@@ -40,7 +48,7 @@ async fn insert_interaction(pool: &crate::db::Db, item: &Interaction) {
         .execute(pool)
         .await;
     } else {
-        // Impression/click: once per user per post per day
+        // Impression/click/cta: once per user per post per day
         let already = sqlx::query_scalar::<_, i64>(
             r#"SELECT COUNT(*) FROM interactions
                WHERE post_id = $1 AND user_id = $2 AND interaction_type = $3
@@ -64,7 +72,7 @@ async fn insert_interaction(pool: &crate::db::Db, item: &Interaction) {
             .execute(pool)
             .await;
 
-            // Update denormalized counts using unique user count
+            // Update denormalized counts using unique user count (cta has no counter column)
             match item.interaction_type.as_str() {
                 "impression" => {
                     let _ = sqlx::query(

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::models::user::{CreateUser, LoginRequest, User};
+use crate::util::db_err;
 
 pub fn router() -> Router<Db> {
     Router::new()
@@ -61,9 +62,7 @@ async fn register(
     .bind(role)
     .fetch_one(&pool)
     .await
-    .map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()})))
-    })?;
+    .map_err(|e| db_err(e, StatusCode::BAD_REQUEST))?;
 
     Ok((StatusCode::CREATED, Json(json!({"user": user}))))
 }
